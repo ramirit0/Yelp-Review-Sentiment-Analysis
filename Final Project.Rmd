@@ -1,0 +1,207 @@
+---
+title: "Yelp Review Classification"
+author: "Ramiro Romero, 205334455"
+date: "2022-11-30"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Project Set-up
+
+We start the project by reading in the necessary libraries and reading in the data itself.
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rjson)
+library(ggplot2)
+library(zoo)
+
+library(tm)
+library(SnowballC)
+library(textcat)
+
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+library(e1071)
+library(wordcloud)
+
+library(yardstick) # classification metrics
+
+Sys.setlocale("LC_ALL", "C")
+
+data <- read.csv("Data_Final")
+dim(data)
+head(data)
+```
+
+## EDA and data reduction
+
+Because our data frame is exceptionally large, containing 53845 observations and 18 variables, we should utilize a subset of the data to save ourselves time in computation and processing.
+
+### row-reduction
+
+```{r}
+# data cleaning
+data$City <- factor(data$City)
+
+levels(data$City)[14:18] <- "Santa Barbara"
+
+table(data$City)
+```
+
+To reduce the number of observations in our data, we can filter out observations outside the city of Santa Barbara.
+
+```{r}
+data <- data[data$City == "Santa Barbara",]
+dim(data)
+table(data$City)
+```
+
+By reducing the dataset to observations exclusively from Santa Barbara, we have reduced the number of observations by over 10,000. 
+
+### column reduction
+
+For now, I am only Interested in the text review, the star rating, and the business id. I will create a new data set called yelp which only contains the three columns of interest.
+
+```{r}
+yelp <- data[c("Star","Review")]
+head(yelp)
+```
+
+Below is a histogram representing the distribution of star ratings.
+
+```{r}
+ggplot(yelp, aes(x=Star))+
+  geom_bar(stat="bin", bins= 9, fill="darkred") + 
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=1.6, color="white") +
+  ggtitle("Histogram of Star Ratings") +
+  xlab("Stars") + ylab("Count") +
+  theme_minimal()
+```
+
+We see above that there is a large proportion of 4 and 5 star ratings compared to 1,2, and 3 star ratings.
+
+To make this a classification problem, star ratings greater than or equal to 4 are positive and negative otherwise. Unfortunately, this will result in unbalanced data because of the high frequency of positive ratings. However, we won't force balance the data because this is the natural occurrence of the data.
+
+Add a column to yelp indicating sentiment
+
+```{r}
+yelp$Positive <- as.factor(yelp$Star >= 4)
+table(yelp$Positive)
+```
+
+1 corresponds to a positive rating, zero corresponds to a negative rating.
+
+### Text Cleaning
+
+# possibly remove non-english reviews
+
+
+Now lets remove stop words and punctuation from the reviews using metadata.
+
+
+```{r}
+corpus <- VCorpus(VectorSource(yelp$Review))
+corpus = tm_map(corpus, content_transformer(tolower))
+corpus = tm_map(corpus, removeNumbers)
+corpus = tm_map(corpus, removePunctuation)
+corpus = tm_map(corpus, removeWords,stopwords("english"))
+corpus = tm_map(corpus, stemDocument)
+corpus = tm_map(corpus,stripWhitespace)
+
+corpus[[1]]$content
+```
+
+
+## Bag of words:
+
+The following technique is called bag of words. It rearranges the data so that each word from the review is a column and each review is a row, with corresponding values for the number of times each respective word appears in each review.
+
+```{r}
+dtm <- DocumentTermMatrix(corpus)
+dtm <- removeSparseTerms(dtm, 0.99)
+reviewsSparse <- as.data.frame(as.matrix(dtm))
+colnames(reviewsSparse) <- make.names(colnames(reviewsSparse))
+
+dim(reviewsSparse)
+```
+
+42,532 reviews as rows and 1006 words will be used to train the model.
+
+To use Random forest algorithm to train the model for classification of the reviews add the dependent variable back into the data set indicating whether the review is positive or negative.
+
+```{r}
+reviewsSparse$Positive <- yelp$Positive
+table(reviewsSparse$Positive)
+```
+
+split the data into training and testing
+
+```{r}
+set.seed(100)
+
+trainIndex <- createDataPartition(reviewsSparse$Positive,
+                                  p = 0.8,
+                                  list = FALSE)
+
+train <- reviewsSparse[trainIndex,]
+test <- reviewsSparse[-trainIndex,]
+
+dim(train);dim(test)
+```
+
+
+calculate baseline accuracy
+
+```{r}
+table(train$Positive)
+24467/nrow(train)
+```
+
+3 quarters of all reviews are positive. What this means is that the data set is biased towards positive reviews and consequentially, the machine learning algorithm will favor the prediction of positive reviews, potentially increasing the false positive rate. However, because this is the natural occurrence of the data, we will preserve the positive bias.
+
+## fit a random forest classification
+
+```{r}
+rf <- randomForest(x = train[-1007],
+                           y = train$Positive,
+                           ntree = 10)
+
+pred_rf <- predict(classifier, newdata = test[-1007])
+levels(pred_rf) <- levels(test$Positive)
+
+
+cm_rf <- confusionMatrix(data = pred_rf, reference = test$Positive, positive = "TRUE")
+cm_rf$table
+cm_rf$byClass[5:7]
+```
+
+It seems like we're getting a lot of false positives, let's check the accuracy of the model
+
+
+## Logistic regression
+
+```{r}
+log <- glm(Positive ~., data = train, family = binomial("logit"))
+pred_log <- predict(log, newdata = test, type = "response")
+```
+
+logistic Regresssion returns a value within the range of [0,1] and not a binary class. The value returned by logistic regression is an estimate of the probability that the data will belong to the positive class.
+
+We will convert the probability into class using threshold value. Any values above the threshold value  of 0.5 will be classified as positive and any values less than 0.5 will be classified as negative.
+
+```{r}
+pred_log <- as.factor(ifelse(pred_log > 0.5, TRUE, FALSE))
+cm_log <- confusionMatrix(data = pred_log, reference = test$Positive, positive = "TRUE")
+cm_log$table
+cm_log$byClass[5:7]
+```
+
+
+
+
+
